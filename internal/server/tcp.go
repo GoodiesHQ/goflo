@@ -265,23 +265,6 @@ func (s *ServerTCP) recvHelloV1(conn net.Conn, r *bufio.Reader, bufHeader []byte
 	return pktHello, bufHello, nil
 }
 
-// sendResultV1 sends a Result packet to the client
-func (s *ServerTCP) sendResultV1(conn net.Conn, w *bufio.Writer, sessionID ulid.ULID, stats *packets.Stats) error {
-	conn.SetWriteDeadline(time.Now().Add(s.timeout))
-
-	pktResult, err := packets.NewResult(sessionID, stats.GetBytesSent(), stats.GetBytesRcvd())
-	if err != nil {
-		return fmt.Errorf("failed to create result packet: %w", err)
-	}
-
-	_, err = packets.SendPacket(w, pktResult)
-	if err != nil {
-		return fmt.Errorf("failed to send result packet: %w", err)
-	}
-
-	return nil
-}
-
 // handleV1 processes a FLO v1 connection
 func (s *ServerTCP) handleV1(ctx context.Context, conn net.Conn, r *bufio.Reader, w *bufio.Writer, bufHeader []byte, header *protocol.Header) error {
 	// Handle FLO v1 connection

@@ -92,23 +92,6 @@ func (c *ClientTCP) recvAckV1(conn net.Conn, r *bufio.Reader, bufHeader []byte) 
 	return pktAck, bufAck, nil
 }
 
-func (c *ClientTCP) recvResult(conn net.Conn, r *bufio.Reader, bufHeader []byte) (*packets.PktResult, []byte, error) {
-	conn.SetReadDeadline(time.Now().Add(c.timeout))
-
-	bufResult, err := utils.ReadExact(r, packets.PktResultSize-protocol.HeaderSize)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to read result packet: %w", err)
-	}
-	bufResult = append(bufHeader, bufResult...)
-
-	pktResult, err := packets.UnmarshalResult(bufResult)
-	if err != nil {
-		return nil, nil, fmt.Errorf("failed to unmarshal result packet: %w", err)
-	}
-
-	return pktResult, bufResult, nil
-}
-
 // sendHelloV1 sends a Hello packet to the server and returns the raw bytes sent
 func (c *ClientTCP) sendHelloV1(conn net.Conn, w *bufio.Writer, sessionId ulid.ULID, direction protocol.FloDir, chunkSize uint32, duration, warmup time.Duration) (*packets.PktHello, []byte, error) {
 	conn.SetWriteDeadline(time.Now().Add(c.timeout))
