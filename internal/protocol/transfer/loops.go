@@ -9,12 +9,12 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/goodieshq/goflo/internal/protocol/packets/v1"
+	"github.com/goodieshq/goflo/internal/protocol"
 	"github.com/goodieshq/goflo/internal/utils"
 	"github.com/rs/zerolog/log"
 )
 
-func SendLoop(ctx context.Context, w io.Writer, chunkSize uint32, stats *packets.Stats, counting *atomic.Bool) error {
+func SendLoop(ctx context.Context, w io.Writer, chunkSize uint32, stats *protocol.Stats, counting *atomic.Bool) error {
 	buf := make([]byte, chunkSize)
 	for i := 0; i < int(chunkSize); i++ {
 		buf[i] = byte(i)
@@ -42,7 +42,7 @@ func SendLoop(ctx context.Context, w io.Writer, chunkSize uint32, stats *packets
 	}
 }
 
-func RecvLoop(ctx context.Context, r io.Reader, chunkSize uint32, stats *packets.Stats, counting *atomic.Bool) error {
+func RecvLoop(ctx context.Context, r io.Reader, chunkSize uint32, stats *protocol.Stats, counting *atomic.Bool) error {
 	buf := make([]byte, chunkSize)
 
 	for {
@@ -58,7 +58,7 @@ func RecvLoop(ctx context.Context, r io.Reader, chunkSize uint32, stats *packets
 		}
 		if err != nil {
 			if errors.Is(err, io.EOF) {
-				return nil
+				return err
 			}
 			select {
 			case <-ctx.Done():
@@ -70,7 +70,7 @@ func RecvLoop(ctx context.Context, r io.Reader, chunkSize uint32, stats *packets
 	}
 }
 
-func Logger(ctx context.Context, stats *packets.Stats, counting *atomic.Bool, warmup time.Duration) {
+func Reporter(ctx context.Context, statsCh chan<- protocol.StatsDiff, stats *protocol.Stats, counting *atomic.Bool, warmup time.Duration) {
 	if warmup > 0 {
 		log.Info().Msgf("Warming up for %s", warmup)
 	}
@@ -101,21 +101,34 @@ func Logger(ctx context.Context, stats *packets.Stats, counting *atomic.Bool, wa
 			lastBytesSent = bytesSent
 			lastBytesRcvd = bytesRcvd
 
-			evt := log.Info()
-			if diffSent > 0 {
-				evt = evt.Str("sent", utils.DisplayBPS(diffSent, diffTime))
+			statsCh <- protocol.StatsDiff{
+				BytesSent: diffSent,
+				BytesRcvd: diffRcvd,
+				Duration:  diffTime,
 			}
-			if diffRcvd > 0 {
-				evt = evt.Str("rcvd", utils.DisplayBPS(diffRcvd, diffTime))
-			}
-			evt.Msg("Throughput stats")
 		}
 	}
 }
 
-func TransferData(ctx context.Context, conn net.Conn, r *bufio.Reader, w *bufio.Writer, chunkSize uint32, duration, warmup time.Duration, stats *packets.Stats) error {
+func Logger(ctx context.Context, statsCh chan protocol.StatsDiff, stats *protocol.Stats, counting *atomic.Bool, warmup time.Duration) {
+	go Reporter(ctx, statsCh, stats, counting, warmup)
+
+	for {
+		diff := <-statsCh
+		evt := log.Info()
+		if diff.BytesSent > 0 {
+			evt = evt.Str("sent", utils.DisplayBitsPerTime(diff.BytesSent, diff.Duration))
+		}
+		if diff.BytesRcvd > 0 {
+			evt = evt.Str("rcvd", utils.DisplayBitsPerTime(diff.BytesRcvd, diff.Duration))
+		}
+		evt.Msg("Throughput stats")
+	}
+}
+
+func TransferData(ctx context.Context, conn net.Conn, r *bufio.Reader, w *bufio.Writer, chunkSize uint32, duration, warmup time.Duration, stats *protocol.Stats) error {
 	// Clear deadline during data transfer
-	conn.SetDeadline(time.Time{})
+	_ = conn.SetDeadline(time.Time{})
 
 	totalTime := duration + warmup
 
@@ -123,6 +136,7 @@ func TransferData(ctx context.Context, conn net.Conn, r *bufio.Reader, w *bufio.
 	ctx, cancel := context.WithTimeout(ctx, totalTime)
 	defer cancel()
 
+	deadline, deadlineOk := ctx.Deadline()
 	var counting atomic.Bool
 
 	count := 0
@@ -134,9 +148,10 @@ func TransferData(ctx context.Context, conn net.Conn, r *bufio.Reader, w *bufio.
 	}
 
 	errCh := make(chan error, count)
+	statsCh := make(chan protocol.StatsDiff)
 
 	// Start the logger goroutine to periodically log stats
-	go Logger(ctx, stats, &counting, warmup)
+	go Logger(ctx, statsCh, stats, &counting, warmup)
 
 	// Start both send and recv transfer loops
 	if w != nil {
@@ -146,12 +161,17 @@ func TransferData(ctx context.Context, conn net.Conn, r *bufio.Reader, w *bufio.
 		go func() { errCh <- RecvLoop(ctx, r, chunkSize, stats, &counting) }()
 	}
 
+	var errStop error
+	// Wait for either either timeout or an error from one of the loops
 	select {
 	case <-ctx.Done():
+		errStop = ctx.Err()
 	case err := <-errCh:
-		_ = err
+		errStop = err
 		cancel()
 	}
+
+	// Half-close the connection if possible
 	if w != nil {
 		_ = w.Flush()
 		if tc, ok := conn.(*net.TCPConn); ok {
@@ -159,14 +179,40 @@ func TransferData(ctx context.Context, conn net.Conn, r *bufio.Reader, w *bufio.
 		}
 	}
 
-	select {
-	case <-ctx.Done():
-		if ctx.Err() == context.Canceled {
-			log.Warn().Msg("Transfer was canceled prematurely")
+	// drain the remaining goroutine results
+	for i := 1; i < count; i++ {
+		select {
+		case <-errCh:
+		case <-time.After(100 * time.Millisecond):
 		}
-		return nil
-	case <-time.After(totalTime):
-		log.Warn().Msg("Transfer exceeded duration")
-		return nil
 	}
+
+	const grace = 250 * time.Millisecond
+
+	remaining := time.Duration(0)
+	if deadlineOk {
+		remaining = time.Until(deadline)
+	}
+
+	var premature bool
+	switch {
+	case errStop == nil:
+		premature = false
+	case errors.Is(errStop, context.DeadlineExceeded):
+		premature = false
+	case errors.Is(errStop, io.EOF):
+		if deadlineOk && remaining > grace {
+			premature = true
+		}
+	default:
+		if !(deadlineOk && remaining <= grace) {
+			premature = true
+		}
+	}
+
+	if premature {
+		log.Warn().Err(errStop).Msg("Transfer ended early (disconnected)")
+	}
+
+	return nil
 }

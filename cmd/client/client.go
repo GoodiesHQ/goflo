@@ -33,7 +33,7 @@ func main() {
 	// Run the client with specified options
 	err := cli.Run(ctx, client.RunOpts{
 		Duration:  utils.Ptr(10 * time.Second),
-		Warmup:    utils.Ptr(2 * time.Second),
+		Warmup:    utils.Ptr(1 * time.Second),
 		ChunkSize: utils.Ptr(uint32(1024 * 8)), // 8KiB
 		Direction: utils.Ptr(protocol.DirectionDownload),
 	})

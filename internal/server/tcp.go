@@ -310,7 +310,9 @@ func (s *ServerTCP) handleV1(ctx context.Context, conn net.Conn, r *bufio.Reader
 	duration := time.Duration(pktHello.DurationMS) * time.Millisecond
 	warmup := time.Duration(pktHello.WarmupMS) * time.Millisecond
 
-	var stats packets.Stats
+	var stats protocol.Stats
+	var t = time.Now()
+
 	switch pktHello.Direction {
 	case protocol.DirectionBidi:
 		err = transfer.TransferData(ctx, conn, r, w, pktHello.ChunkSize, duration, warmup, &stats)
@@ -333,17 +335,23 @@ func (s *ServerTCP) handleV1(ctx context.Context, conn net.Conn, r *bufio.Reader
 
 	_ = w.Flush()
 
+	durationReal := time.Since(t) - warmup
+	if durationReal < 0 {
+		durationReal = 0
+	}
+
 	sessionIdStr := pktHello.SessionID.String()
 	evt := log.Info().Str("session_id", sessionIdStr)
+	evt = evt.Str("duration", utils.DisplayTime(durationReal))
 	if stats.GetBytesSent() > 0 {
-		evt = evt.Str("total_sent", utils.DisplayB(stats.GetBytesSent())).
-			Str("avg_sent", utils.DisplayBPS(stats.GetBytesSent(), duration))
+		evt = evt.Str("total_sent", utils.DisplayBytes(stats.GetBytesSent())).
+			Str("avg_sent", utils.DisplayBitsPerTime(stats.GetBytesSent(), durationReal))
 	}
 	if stats.GetBytesRcvd() > 0 {
-		evt = evt.Str("total_rcvd", utils.DisplayB(stats.GetBytesRcvd())).
-			Str("avg_rcvd", utils.DisplayBPS(stats.GetBytesRcvd(), duration))
+		evt = evt.Str("total_rcvd", utils.DisplayBytes(stats.GetBytesRcvd())).
+			Str("avg_rcvd", utils.DisplayBitsPerTime(stats.GetBytesRcvd(), durationReal))
 	}
-	evt.Msg("Data transfer complete")
+	evt.Msg("Client data transfer complete")
 
 	return nil
 }

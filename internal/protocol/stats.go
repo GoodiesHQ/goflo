@@ -1,6 +1,9 @@
-package packets
+package protocol
 
-import "sync/atomic"
+import (
+	"sync/atomic"
+	"time"
+)
 
 // Stats will keep track of total bytes sent and received during a test session
 type Stats struct {
@@ -27,4 +30,10 @@ func (s *Stats) GetBytesSent() uint64 {
 
 func (s *Stats) GetBytesRcvd() uint64 {
 	return s.bytesRcvd.Load()
+}
+
+type StatsDiff struct {
+	BytesSent uint64
+	BytesRcvd uint64
+	Duration  time.Duration
 }
